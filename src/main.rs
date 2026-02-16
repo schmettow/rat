@@ -4,7 +4,6 @@ use std::path::Path;
 use std::sync::mpsc;
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
-use clap::{Parser, ArgAction};
 
 fn timestamp() -> u64 {
     SystemTime::now()
@@ -13,19 +12,9 @@ fn timestamp() -> u64 {
         .as_secs()
 }
 
-#[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
 struct Args {
-    /// Output directory for the CSV file
-    #[arg(long, short)]
     directory: String,
-
-    /// Default baud rate (overridden per-port if specified)
-    #[arg(long, default_value_t = 19200)]
     default_baud: u32,
-
-    /// Serial port(s) to read from, format: <port>[,<baud>]
-    #[arg(long = "port", short = 'p', action = ArgAction::Append)]
     ports: Vec<String>,
 }
 
@@ -39,17 +28,89 @@ fn parse_port_arg(arg: &str, default_baud: u32) -> (String, u32) {
     (port, baud)
 }
 
-fn main() -> std::io::Result<()> {
-    let args = Args::parse();
+fn print_usage() {
+    eprintln!("Usage: rat [OPTIONS]");
+    eprintln!();
+    eprintln!("OPTIONS:");
+    eprintln!("  -d, --directory <DIR>        Output directory for the CSV file (required)");
+    eprintln!("  -b, --default-baud <BAUD>   Default baud rate (default: 19200)");
+    eprintln!("  -p, --port <PORT[,BAUD]>    Serial port to read from. Can be specified multiple times");
+    eprintln!("                               Format: /dev/ttyUSB0 or /dev/ttyUSB0,9600");
+    eprintln!("  -h, --help                   Print this help message");
+}
 
-    if args.ports.is_empty() {
-        eprintln!("At least one --port argument is required.");
-        std::process::exit(1);
+fn parse_args() -> Result<Args, String> {
+    let args: Vec<String> = std::env::args().collect();
+
+    let mut directory = String::new();
+    let mut default_baud = 19200u32;
+    let mut ports = Vec::new();
+
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-h" | "--help" => {
+                print_usage();
+                std::process::exit(0);
+            }
+            "-d" | "--directory" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err("--directory requires an argument".to_string());
+                }
+                directory = args[i].clone();
+            }
+            "-b" | "--default-baud" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err("--default-baud requires an argument".to_string());
+                }
+                default_baud = args[i].parse()
+                    .map_err(|_| format!("Invalid baud rate: {}", args[i]))?;
+            }
+            "-p" | "--port" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err("--port requires an argument".to_string());
+                }
+                ports.push(args[i].clone());
+            }
+            arg => {
+                return Err(format!("Unknown argument: {}", arg));
+            }
+        }
+        i += 1;
     }
-    if args.ports.len() > 8 {
-        eprintln!("Maximum 8 ports supported");
-        std::process::exit(1);
+
+    if directory.is_empty() {
+        return Err("--directory is required".to_string());
     }
+
+    if ports.is_empty() {
+        return Err("At least one --port argument is required".to_string());
+    }
+
+    if ports.len() > 8 {
+        return Err("Maximum 8 ports supported".to_string());
+    }
+
+    Ok(Args {
+        directory,
+        default_baud,
+        ports,
+    })
+}
+
+fn main() -> std::io::Result<()> {
+    let args = match parse_args() {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("Error: {}", e);
+            eprintln!();
+            print_usage();
+            std::process::exit(1);
+        }
+    };
 
     let directory = Path::new(&args.directory);
     create_dir_all(directory)?;
@@ -72,9 +133,13 @@ fn main() -> std::io::Result<()> {
         let port_name = port_name.clone();
 
         thread::spawn(move || {
-            let port = serialport::new(&port_name, baud)
-                .open()
-                .expect("Failed to open serial port");
+            let port = match serialport::new(&port_name, baud).open() {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("Failed to open serial port {}: {}", port_name, e);
+                    return;
+                }
+            };
 
             let reader = BufReader::new(port);
 
